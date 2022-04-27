@@ -17421,14 +17421,13 @@ EXPORT_SYMBOL(cfg80211_rx_unexpected_4addr_frame);
 
 int nl80211_send_mgmt(struct cfg80211_registered_device *rdev,
 		      struct wireless_dev *wdev, u32 nlportid,
-		      int freq, int sig_dbm,
-		      const u8 *buf, size_t len, u32 flags, gfp_t gfp)
+		      struct cfg80211_rx_info *info, gfp_t gfp)
 {
 	struct net_device *netdev = wdev->netdev;
 	struct sk_buff *msg;
 	void *hdr;
 
-	msg = nlmsg_new(100 + len, gfp);
+	msg = nlmsg_new(100 + info->len, gfp);
 	if (!msg)
 		return -ENOMEM;
 
@@ -17443,13 +17442,21 @@ int nl80211_send_mgmt(struct cfg80211_registered_device *rdev,
 					netdev->ifindex)) ||
 	    nla_put_u64_64bit(msg, NL80211_ATTR_WDEV, wdev_id(wdev),
 			      NL80211_ATTR_PAD) ||
-	    nla_put_u32(msg, NL80211_ATTR_WIPHY_FREQ, KHZ_TO_MHZ(freq)) ||
-	    nla_put_u32(msg, NL80211_ATTR_WIPHY_FREQ_OFFSET, freq % 1000) ||
-	    (sig_dbm &&
-	     nla_put_u32(msg, NL80211_ATTR_RX_SIGNAL_DBM, sig_dbm)) ||
-	    nla_put(msg, NL80211_ATTR_FRAME, len, buf) ||
-	    (flags &&
-	     nla_put_u32(msg, NL80211_ATTR_RXMGMT_FLAGS, flags)))
+	    nla_put_u32(msg, NL80211_ATTR_WIPHY_FREQ, KHZ_TO_MHZ(info->freq)) ||
+	    nla_put_u32(msg, NL80211_ATTR_WIPHY_FREQ_OFFSET, info->freq % 1000) ||
+	    (info->sig_dbm &&
+	     nla_put_u32(msg, NL80211_ATTR_RX_SIGNAL_DBM, info->sig_dbm)) ||
+	    nla_put(msg, NL80211_ATTR_FRAME, info->len, info->buf) ||
+	    (info->flags &&
+	     nla_put_u32(msg, NL80211_ATTR_RXMGMT_FLAGS, info->flags)) ||
+	    (info->rx_tstamp && nla_put_u64_64bit(msg,
+						  NL80211_ATTR_RX_HW_TIMESTAMP,
+						  info->rx_tstamp,
+						  NL80211_ATTR_PAD)) ||
+	    (info->ack_tstamp && nla_put_u64_64bit(msg,
+						   NL80211_ATTR_TX_HW_TIMESTAMP,
+						   info->ack_tstamp,
+						   NL80211_ATTR_PAD)))
 		goto nla_put_failure;
 
 	genlmsg_end(msg, hdr);
@@ -17461,8 +17468,8 @@ int nl80211_send_mgmt(struct cfg80211_registered_device *rdev,
 	return -ENOBUFS;
 }
 
-static void nl80211_frame_tx_status(struct wireless_dev *wdev, u64 cookie,
-				    const u8 *buf, size_t len, bool ack,
+static void nl80211_frame_tx_status(struct wireless_dev *wdev,
+				    struct cfg80211_tx_status *status,
 				    gfp_t gfp, enum nl80211_commands command)
 {
 	struct wiphy *wiphy = wdev->wiphy;
@@ -17472,11 +17479,13 @@ static void nl80211_frame_tx_status(struct wireless_dev *wdev, u64 cookie,
 	void *hdr;
 
 	if (command == NL80211_CMD_FRAME_TX_STATUS)
-		trace_cfg80211_mgmt_tx_status(wdev, cookie, ack);
+		trace_cfg80211_mgmt_tx_status(wdev, status->cookie,
+					      status->ack);
 	else
-		trace_cfg80211_control_port_tx_status(wdev, cookie, ack);
+		trace_cfg80211_control_port_tx_status(wdev, status->cookie,
+						      status->ack);
 
-	msg = nlmsg_new(100 + len, gfp);
+	msg = nlmsg_new(100 + status->len, gfp);
 	if (!msg)
 		return;
 
@@ -17491,10 +17500,16 @@ static void nl80211_frame_tx_status(struct wireless_dev *wdev, u64 cookie,
 				   netdev->ifindex)) ||
 	    nla_put_u64_64bit(msg, NL80211_ATTR_WDEV, wdev_id(wdev),
 			      NL80211_ATTR_PAD) ||
-	    nla_put(msg, NL80211_ATTR_FRAME, len, buf) ||
-	    nla_put_u64_64bit(msg, NL80211_ATTR_COOKIE, cookie,
+	    nla_put(msg, NL80211_ATTR_FRAME, status->len, status->buf) ||
+	    nla_put_u64_64bit(msg, NL80211_ATTR_COOKIE, status->cookie,
 			      NL80211_ATTR_PAD) ||
-	    (ack && nla_put_flag(msg, NL80211_ATTR_ACK)))
+	    (status->ack && nla_put_flag(msg, NL80211_ATTR_ACK)) ||
+	    (status->tx_tstamp &&
+	     nla_put_u64_64bit(msg, NL80211_ATTR_TX_HW_TIMESTAMP,
+			       status->tx_tstamp, NL80211_ATTR_PAD)) ||
+	    (status->ack_tstamp &&
+	     nla_put_u64_64bit(msg, NL80211_ATTR_RX_HW_TIMESTAMP,
+			       status->ack_tstamp, NL80211_ATTR_PAD)))
 		goto nla_put_failure;
 
 	genlmsg_end(msg, hdr);
@@ -17511,18 +17526,24 @@ void cfg80211_control_port_tx_status(struct wireless_dev *wdev, u64 cookie,
 				     const u8 *buf, size_t len, bool ack,
 				     gfp_t gfp)
 {
-	nl80211_frame_tx_status(wdev, cookie, buf, len, ack, gfp,
+	struct cfg80211_tx_status status = {
+		.cookie = cookie,
+		.buf = buf,
+		.len = len,
+		.ack = ack
+	};
+
+	nl80211_frame_tx_status(wdev, &status, gfp,
 				NL80211_CMD_CONTROL_PORT_FRAME_TX_STATUS);
 }
 EXPORT_SYMBOL(cfg80211_control_port_tx_status);
 
-void cfg80211_mgmt_tx_status(struct wireless_dev *wdev, u64 cookie,
-			     const u8 *buf, size_t len, bool ack, gfp_t gfp)
+void cfg80211_mgmt_tx_status_ext(struct wireless_dev *wdev,
+				 struct cfg80211_tx_status *status, gfp_t gfp)
 {
-	nl80211_frame_tx_status(wdev, cookie, buf, len, ack, gfp,
-				NL80211_CMD_FRAME_TX_STATUS);
+	nl80211_frame_tx_status(wdev, status, gfp, NL80211_CMD_FRAME_TX_STATUS);
 }
-EXPORT_SYMBOL(cfg80211_mgmt_tx_status);
+EXPORT_SYMBOL(cfg80211_mgmt_tx_status_ext);
 
 static int __nl80211_rx_control_port(struct net_device *dev,
 				     struct sk_buff *skb,
